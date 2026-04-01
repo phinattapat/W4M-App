@@ -47,23 +47,19 @@ class WallpaperVM: ObservableObject {
     }
 
     func updateWallpaper(to url: URL) {
-            // 🔥 THE FIX: Push this save action to the Main Thread so SwiftUI doesn't crash
-            DispatchQueue.main.async {
-                self.lastUsedWallpaperPath = url.path
+        lastUsedWallpaperPath = url.path
+        let workspace = NSWorkspace.shared
+        
+        if changeAllScreens {
+            for screen in NSScreen.screens {
+                try? workspace.setDesktopImageURL(url, for: screen, options: [:])
             }
-            
-            let workspace = NSWorkspace.shared
-            
-            if changeAllScreens {
-                for screen in NSScreen.screens {
-                    try? workspace.setDesktopImageURL(url, for: screen, options: [:])
-                }
-            } else {
-                if let mainScreen = NSScreen.main {
-                    try? workspace.setDesktopImageURL(url, for: mainScreen, options: [:])
-                }
+        } else {
+            if let mainScreen = NSScreen.main {
+                try? workspace.setDesktopImageURL(url, for: mainScreen, options: [:])
             }
         }
+    }
 
     // THE MAGIC: Watches for space changes and re-applies the wallpaper
     private func setupSpaceObserver() {
