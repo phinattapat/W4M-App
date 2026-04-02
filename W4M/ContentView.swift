@@ -5,7 +5,43 @@ import ServiceManagement
 
 // --- THE BRAIN (Logic) ---
 class WallpaperVM: ObservableObject {
-    
+    @AppStorage("favoritePaths") var favoritePathsData: Data = Data() // Stores Set<String> as Data
+        
+        // Helper to get/set favorites as a Set
+        var favoritePaths: Set<String> {
+            get {
+                (try? JSONDecoder().decode(Set<String>.self, from: favoritePathsData)) ?? []
+            }
+            set {
+                if let data = try? JSONEncoder().encode(newValue) {
+                    favoritePathsData = data
+                }
+            }
+        }
+
+        // --- THE FIX: This provides the sorted list for your View ---
+        var sortedWallpapers: [URL] {
+            wallpaperURLs.sorted { url1, url2 in
+                let fav1 = favoritePaths.contains(url1.path)
+                let fav2 = favoritePaths.contains(url2.path)
+                
+                if fav1 != fav2 {
+                    return fav1 // Favorites float to the top
+                }
+                return url1.lastPathComponent < url2.lastPathComponent // Then alphabetical
+            }
+        }
+
+        func toggleFavorite(url: URL) {
+            var current = favoritePaths
+            if current.contains(url.path) {
+                current.remove(url.path)
+            } else {
+                current.insert(url.path)
+            }
+            favoritePaths = current
+            objectWillChange.send() // Ensure UI updates
+        }
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled {
         didSet {
             // Safe system update on the main thread

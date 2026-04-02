@@ -6,11 +6,11 @@ struct MainMenuView: View {
     @ObservedObject var vm: WallpaperVM
     @State private var activeURL: URL? = nil
     @State private var isTransitioning = false
-
+    
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                // HEADER
+                // --- HEADER ---
                 VStack(spacing: 0) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -30,13 +30,8 @@ struct MainMenuView: View {
                         .labelsHidden()
                         .tint(.blue)
                         .accentColor(.blue)
-                        // 💡 THE FIX: macOS 14+ requires (oldValue, newValue)
                         .onChange(of: vm.changeAllScreens) { oldValue, newValue in
-                            
-                            // Save the new setting to disk
                             UserDefaults.standard.set(newValue, forKey: "changeAllScreens")
-                            
-                            // Apply the wallpaper if needed
                             if newValue && !vm.lastUsedWallpaperPath.isEmpty {
                                 let url = URL(fileURLWithPath: vm.lastUsedWallpaperPath)
                                 vm.updateWallpaper(to: url)
@@ -56,7 +51,7 @@ struct MainMenuView: View {
 
                 Divider()
 
-                // GRID
+                // --- GRID SECTION ---
                 if vm.folderPathString.isEmpty {
                     VStack(spacing: 20) {
                         Image(systemName: "display.2")
@@ -70,25 +65,47 @@ struct MainMenuView: View {
                     .frame(width: 440, height: 400)
                 } else {
                     ScrollView(showsIndicators: false) {
-                        LazyVGrid(columns: [
-                            GridItem(.fixed(130), spacing: 12),
-                            GridItem(.fixed(130), spacing: 12),
-                            GridItem(.fixed(130), spacing: 12)
-                        ], spacing: 15) {
-                            ForEach(vm.wallpaperURLs, id: \.self) { url in
-                                WallpaperItem(url: url, isActive: activeURL == url) {
-                                    triggerChange(url: url)
+                            // 💡 Use 3 Flexible items to force exactly 3 equal-width columns
+                            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 15) {
+                                ForEach(vm.sortedWallpapers, id: \.self) { url in
+                                    ZStack(alignment: .topTrailing) {
+                                        // Main Thumbnail
+                                        WallpaperItem(url: url, isActive: activeURL == url) {
+                                            triggerChange(url: url)
+                                        }
+                                        
+                                        // --- THE HEART/PIN BUTTON ---
+                                        Button(action: {
+                                            withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+                                                vm.toggleFavorite(url: url)
+                                            }
+                                            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                                        }) {
+                                            let isPinned = vm.favoritePaths.contains(url.path)
+                                            Image(systemName: isPinned ? "heart.fill" : "heart")
+                                                .font(.system(size: 10, weight: .black))
+                                                .foregroundColor(isPinned ? Color(nsColor: NSColor(calibratedRed: 0.82, green: 0.16, blue: 0.35, alpha: 1.0)) : .white.opacity(0.8))
+                                                .padding(6)
+                                                .background(
+                                                    VisualEffectView(material: .hudWindow, blendingMode: .withinWindow)
+                                                        .cornerRadius(8)
+                                                )
+                                                .shadow(radius: 2)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .padding(6)
+                                    }
                                 }
                             }
+                            .padding(.horizontal, 15) // Clean spacing on sides
+                            .padding(.vertical, 10)
                         }
-                        .padding()
-                    }
-                    .frame(width: 440, height: 520)
+                        .frame(width: 440, height: 520)
                 }
 
                 Divider()
                 
-                // BOTTOM BAR
+                // --- BOTTOM BAR ---
                 HStack(alignment: .center, spacing: 15) {
                     Button("QUIT") { NSApplication.shared.terminate(nil) }
                         .font(.system(size: 10, weight: .bold))
@@ -108,23 +125,16 @@ struct MainMenuView: View {
                     
                     Spacer()
                     
-                    if vm.changeAllScreens {
-                        Text("MODE: ALL SCREENS")
-                            .font(.system(size: 8, weight: .black))
-                            .foregroundColor(.blue)
-                            .opacity(0.8)
-                    }
-                    else {
-                        Text("MODE: CURRENT SCREENS")
-                            .font(.system(size: 8, weight: .black))
-                            .foregroundColor(.blue)
-                            .opacity(0.8)
-                    }
+                    Text("MODE: \(vm.changeAllScreens ? "ALL SCREENS" : "CURRENT SCREEN")")
+                        .font(.system(size: 8, weight: .black))
+                        .foregroundColor(.blue)
+                        .opacity(0.8)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
             }
 
+            // Darkening overlay during transition
             Color.black
                 .opacity(isTransitioning ? 0.4 : 0)
                 .ignoresSafeArea()
