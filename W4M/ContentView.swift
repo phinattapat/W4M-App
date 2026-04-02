@@ -1,15 +1,34 @@
 import SwiftUI
 import AppKit
 import Combine
+import ServiceManagement
 
 // --- THE BRAIN (Logic) ---
 class WallpaperVM: ObservableObject {
+    
+    @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled {
+        didSet {
+            // Safe system update on the main thread
+            DispatchQueue.main.async {
+                do {
+                    if self.launchAtLogin {
+                        try SMAppService.mainApp.register()
+                    } else {
+                        try SMAppService.mainApp.unregister()
+                    }
+                } catch {
+                    print("Failed to update login item: \(error)")
+                }
+            }
+        }
+    }
+
+    // Your existing variables
     @AppStorage("wallpaperFolderPath") var folderPathString: String = ""
     @AppStorage("lastUsedWallpaper") var lastUsedWallpaperPath: String = ""
     
-    @Published var changeAllScreens: Bool {
-        didSet { UserDefaults.standard.set(changeAllScreens, forKey: "changeAllScreens") }
-    }
+    // 💡 THE FIX: Stripped of side-effects. Just a plain variable now.
+    @Published var changeAllScreens: Bool
     
     @Published var wallpaperURLs: [URL] = []
     private var spaceObserver: NSObjectProtocol?
@@ -29,39 +48,69 @@ class WallpaperVM: ObservableObject {
         panel.prompt = "Select Folder"
 
         if panel.runModal() == .OK, let url = panel.url {
+            let didStart = url.startAccessingSecurityScopedResource()
+            
             self.folderPathString = url.path
             fetchWallpapers()
+            
+            if didStart { url.stopAccessingSecurityScopedResource() }
         }
     }
 
     func fetchWallpapers() {
+        guard !folderPathString.isEmpty else { return }
         let url = URL(fileURLWithPath: folderPathString)
-        let fileManager = FileManager.default
-        var isDir: ObjCBool = false
-        if fileManager.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-            let files = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
-            self.wallpaperURLs = files?.filter {
-                ["jpg", "jpeg", "png", "heic"].contains($0.pathExtension.lowercased())
-            }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) ?? []
+        
+        let didStart = url.startAccessingSecurityScopedResource()
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            let files = try? FileManager.default.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+            
+            let foundURLs = files?.filter {
+                let ext = $0.pathExtension.lowercased()
+                return ["jpg", "jpeg", "png", "heic", "webp"].contains(ext)
+            } ?? []
+
+            DispatchQueue.main.async {
+                if self.wallpaperURLs != foundURLs {
+                    self.wallpaperURLs = foundURLs
+                }
+                
+                if didStart {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
         }
     }
+    private var lastUpdate: Date = .distantPast
 
     func updateWallpaper(to url: URL) {
-        lastUsedWallpaperPath = url.path
-        let workspace = NSWorkspace.shared
-        
-        if changeAllScreens {
-            for screen in NSScreen.screens {
-                try? workspace.setDesktopImageURL(url, for: screen, options: [:])
-            }
-        } else {
-            if let mainScreen = NSScreen.main {
-                try? workspace.setDesktopImageURL(url, for: mainScreen, options: [:])
+        // 1. Prevent "Spamming" (The BSBlockSentinel fix)
+        // If less than 0.5s has passed, ignore the click.
+        guard Date().timeIntervalSince(lastUpdate) > 0.5 else { return }
+        lastUpdate = Date()
+
+        // 2. All Wallpaper calls MUST be on Main Thread (The Scene fix)
+        DispatchQueue.main.async {
+            self.lastUsedWallpaperPath = url.path
+            
+            let screens = self.changeAllScreens ? NSScreen.screens : [NSScreen.main].compactMap { $0 }
+            
+            for screen in screens {
+                do {
+                    // macOS 14+ prefers this on the main thread
+                    try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
+                } catch {
+                    // ONLY this print matters. If this doesn't trigger, you're fine.
+                    print("ACTUAL ERROR: \(error)")
+                }
             }
         }
     }
-
-    // THE MAGIC: Watches for space changes and re-applies the wallpaper
     private func setupSpaceObserver() {
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
@@ -75,127 +124,10 @@ class WallpaperVM: ObservableObject {
             }
         }
     }
-
+    
     func startMonitoring() {
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
-            Task { @MainActor in
-                if !self.folderPathString.isEmpty { self.fetchWallpapers() }
-            }
-        }
-    }
-}
-
-// --- THE UI ---
-struct MainMenuView: View {
-    @ObservedObject var vm: WallpaperVM
-    @State private var activeURL: URL? = nil
-    @State private var isTransitioning = false
-
-    var body: some View {
-        ZStack {
-            VStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("W4M").font(.system(size: 16, weight: .black, design: .monospaced))
-                            Text(vm.folderPathString.isEmpty ? "NO SOURCE" : "\(vm.wallpaperURLs.count) IMAGES")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        
-                        Picker("", selection: $vm.changeAllScreens) {
-                            Text("Current").tag(false)
-                            Text("All Screens").tag(true)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 150)
-                        .labelsHidden()
-                        
-                        Button(action: vm.selectFolder) {
-                            Image(systemName: "folder.fill.badge.plus")
-                                .font(.system(size: 14))
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.leading, 8)
-                    }
-                    .padding()
-                }
-                .background(VisualEffectView(material: .headerView, blendingMode: .withinWindow))
-
-                Divider()
-
-                if vm.folderPathString.isEmpty {
-                    VStack(spacing: 20) {
-                        Image(systemName: "display.2")
-                            .font(.system(size: 40))
-                            .foregroundColor(.gray.opacity(0.2))
-                        
-                        Button("SELECT SOURCE FOLDER", action: vm.selectFolder)
-                            .buttonStyle(.bordered)
-                            .controlSize(.large)
-                    }
-                    .frame(width: 440, height: 400)
-                } else {
-                    ScrollView(showsIndicators: false) {
-                        LazyVGrid(columns: [
-                            GridItem(.fixed(130), spacing: 12),
-                            GridItem(.fixed(130), spacing: 12),
-                            GridItem(.fixed(130), spacing: 12)
-                        ], spacing: 15) {
-                            ForEach(vm.wallpaperURLs, id: \.self) { url in
-                                WallpaperItem(url: url, isActive: activeURL == url) {
-                                    triggerChange(url: url)
-                                }
-                            }
-                        }
-                        .padding()
-                    }
-                    .frame(width: 440, height: 520)
-                }
-
-                Divider()
-                
-                HStack {
-                    Button("QUIT") { NSApplication.shared.terminate(nil) }
-                        .font(.system(size: 10, weight: .bold))
-                        .buttonStyle(.plain)
-                        .opacity(0.4)
-                    Spacer()
-                    if vm.changeAllScreens {
-                        Text("MODE: BROADCAST")
-                            .font(.system(size: 8, weight: .black))
-                            .foregroundColor(.blue)
-                            .opacity(0.8)
-                    }
-                }
-                .padding(12)
-            }
-
-            Color.black
-                .opacity(isTransitioning ? 0.4 : 0)
-                .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.25), value: isTransitioning)
-        }
-    }
-
-    func triggerChange(url: URL) {
-        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-
-        withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.6)) {
-            activeURL = url
-            isTransitioning = true
-        }
-
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.1) {
-            vm.updateWallpaper(to: url)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    activeURL = nil
-                    isTransitioning = false
-                }
-            }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.fetchWallpapers()
         }
     }
 }

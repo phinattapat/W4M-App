@@ -1,7 +1,10 @@
 import SwiftUI
 import Combine
+import ServiceManagement
+
 @main
 struct W4MApp: App {
+    // This creates your ViewModel once and keeps it alive
     @StateObject private var vm = WallpaperVM()
 
     var body: some Scene {
