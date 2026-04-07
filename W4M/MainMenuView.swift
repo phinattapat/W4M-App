@@ -12,38 +12,61 @@ struct MainMenuView: View {
             VStack(spacing: 0) {
                 // --- HEADER ---
                 VStack(spacing: 0) {
-                    HStack {
+                    HStack(alignment: .center) {
+                        // LEFT SECTION: Branding
                         VStack(alignment: .leading, spacing: 2) {
                             Text("W4M").font(.system(size: 16, weight: .black, design: .monospaced))
-                            Text(vm.folderPathString.isEmpty ? "NO SOURCE" : "\(vm.wallpaperURLs.count) IMAGES")
+                            Text(vm.folderPathString.isEmpty ? "NO SOURCE" : "\(vm.currentWallpapers.count) FILES")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(.secondary)
                         }
+                        .frame(width: 80, alignment: .leading)
+                        
                         Spacer()
                         
-                        Picker("", selection: $vm.changeAllScreens) {
-                            Text("Current").tag(false)
-                            Text("All Screens").tag(true)
+                        // CENTER SECTION: Tabs (Blue Selection)
+                        Picker("", selection: $vm.activeTab) {
+                            Text("Photos").tag("Photos")
+                            Text("Videos").tag("Videos")
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 150)
+                        .tint(.blue) // Makes the selection blue
+                        .frame(width: 140)
                         .labelsHidden()
-                        .tint(.blue)
-                        .accentColor(.blue)
-                        .onChange(of: vm.changeAllScreens) { oldValue, newValue in
-                            UserDefaults.standard.set(newValue, forKey: "changeAllScreens")
-                            if newValue && !vm.lastUsedWallpaperPath.isEmpty {
-                                let url = URL(fileURLWithPath: vm.lastUsedWallpaperPath)
-                                vm.updateWallpaper(to: url)
-                            }
-                        }
                         
-                        Button(action: vm.selectFolder) {
-                            Image(systemName: "folder.fill.badge.plus")
-                                .font(.system(size: 14))
+                        Spacer()
+                        
+                        // RIGHT SECTION: Controls
+                        HStack(spacing: 8) {
+                            if vm.activeTab == "Photos" {
+                                Picker("", selection: $vm.changeAllScreens) {
+                                    Text("Single").tag(false)
+                                    Text("All").tag(true)
+                                }
+                                .pickerStyle(.segmented)
+                                .tint(.blue) // Makes the selection blue
+                                .frame(width: 100)
+                                .labelsHidden()
+                                .transition(.opacity)
+                                .onChange(of: vm.changeAllScreens) { oldValue, newValue in
+                                    UserDefaults.standard.set(newValue, forKey: "changeAllScreens")
+                                    if newValue && !vm.lastUsedWallpaperPath.isEmpty {
+                                        let url = URL(fileURLWithPath: vm.lastUsedWallpaperPath)
+                                        vm.updateWallpaper(to: url)
+                                    }
+                                }
+                            } else {
+                                // Keeps layout stable when "Single/All" is hidden
+                                Spacer().frame(width: 100)
+                            }
+                            
+                            Button(action: vm.selectFolder) {
+                                Image(systemName: "folder.fill.badge.plus")
+                                    .font(.system(size: 14))
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
-                        .padding(.leading, 8)
+                        .frame(width: 130, alignment: .trailing)
                     }
                     .padding()
                 }
@@ -62,45 +85,42 @@ struct MainMenuView: View {
                             .buttonStyle(.bordered)
                             .controlSize(.large)
                     }
-                    .frame(width: 440, height: 400)
+                    .frame(width: 440, height: 520)
                 } else {
                     ScrollView(showsIndicators: false) {
-                            // 💡 Use 3 Flexible items to force exactly 3 equal-width columns
-                            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 15) {
-                                ForEach(vm.sortedWallpapers, id: \.self) { url in
-                                    ZStack(alignment: .topTrailing) {
-                                        // Main Thumbnail
-                                        WallpaperItem(url: url, isActive: activeURL == url) {
-                                            triggerChange(url: url)
-                                        }
-                                        
-                                        // --- THE HEART/PIN BUTTON ---
-                                        Button(action: {
-                                            withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
-                                                vm.toggleFavorite(url: url)
-                                            }
-                                            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-                                        }) {
-                                            let isPinned = vm.favoritePaths.contains(url.path)
-                                            Image(systemName: isPinned ? "heart.fill" : "heart")
-                                                .font(.system(size: 10, weight: .black))
-                                                .foregroundColor(isPinned ? Color(nsColor: NSColor(calibratedRed: 0.82, green: 0.16, blue: 0.35, alpha: 1.0)) : .white.opacity(0.8))
-                                                .padding(6)
-                                                .background(
-                                                    VisualEffectView(material: .hudWindow, blendingMode: .withinWindow)
-                                                        .cornerRadius(8)
-                                                )
-                                                .shadow(radius: 2)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .padding(6)
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 15) {
+                            ForEach(vm.currentWallpapers, id: \.self) { url in
+                                ZStack(alignment: .topTrailing) {
+                                    WallpaperItem(url: url, isActive: activeURL == url) {
+                                        triggerChange(url: url)
                                     }
+                                    
+                                    Button(action: {
+                                        withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+                                            vm.toggleFavorite(url: url)
+                                        }
+                                        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                                    }) {
+                                        let isPinned = vm.favoritePaths.contains(url.path)
+                                        Image(systemName: isPinned ? "heart.fill" : "heart")
+                                            .font(.system(size: 10, weight: .black))
+                                            .foregroundColor(isPinned ? Color(nsColor: NSColor(calibratedRed: 0.82, green: 0.16, blue: 0.35, alpha: 1.0)) : .white.opacity(0.8))
+                                            .padding(6)
+                                            .background(
+                                                VisualEffectView(material: .hudWindow, blendingMode: .withinWindow)
+                                                    .cornerRadius(8)
+                                            )
+                                            .shadow(radius: 2)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(6)
                                 }
                             }
-                            .padding(.horizontal, 15) // Clean spacing on sides
-                            .padding(.vertical, 10)
                         }
-                        .frame(width: 440, height: 520)
+                        .padding(.horizontal, 15)
+                        .padding(.vertical, 10)
+                    }
+                    .frame(width: 440, height: 520)
                 }
 
                 Divider()
@@ -134,11 +154,17 @@ struct MainMenuView: View {
                 .padding(.vertical, 10)
             }
 
-            // Darkening overlay during transition
+            // Darkening overlay
             Color.black
                 .opacity(isTransitioning ? 0.4 : 0)
                 .ignoresSafeArea()
                 .animation(.easeInOut(duration: 0.25), value: isTransitioning)
+        }
+        // Force Single Mode for Videos
+        .onChange(of: vm.activeTab) { oldValue, newValue in
+            if newValue == "Videos" {
+                vm.changeAllScreens = false
+            }
         }
     }
 
@@ -162,5 +188,24 @@ struct MainMenuView: View {
                 }
             }
         }
+    }
+}
+
+// --- HELPER ---
+struct VisualEffectView: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+    
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = .active
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
     }
 }
