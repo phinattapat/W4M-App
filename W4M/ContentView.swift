@@ -4,42 +4,31 @@ import Combine
 import ServiceManagement
 import AVKit
 
-// --- THE BRAIN (Logic) ---
 class WallpaperVM: ObservableObject {
     @AppStorage("favoritePaths") var favoritePathsData: Data = Data()
-    
-    // --- NEW: TAB & CATEGORY LOGIC ---
     @Published var activeTab: String = "Photos"
     @Published var photoURLs: [URL] = []
     @Published var videoURLs: [URL] = []
 
-    // Helper to get/set favorites as a Set
     var favoritePaths: Set<String> {
         get { (try? JSONDecoder().decode(Set<String>.self, from: favoritePathsData)) ?? [] }
         set { if let data = try? JSONEncoder().encode(newValue) { favoritePathsData = data } }
     }
 
-    // --- UPDATED: Returns the sorted list based on the ACTIVE TAB ---
     var currentWallpapers: [URL] {
         let currentSource = (activeTab == "Photos" ? photoURLs : videoURLs)
         return currentSource.sorted { url1, url2 in
             let fav1 = favoritePaths.contains(url1.path)
             let fav2 = favoritePaths.contains(url2.path)
-            
-            if fav1 != fav2 {
-                return fav1 // Favorites float to the top
-            }
+            if fav1 != fav2 { return fav1 }
             return url1.lastPathComponent < url2.lastPathComponent
         }
     }
 
     func toggleFavorite(url: URL) {
         var current = favoritePaths
-        if current.contains(url.path) {
-            current.remove(url.path)
-        } else {
-            current.insert(url.path)
-        }
+        if current.contains(url.path) { current.remove(url.path) }
+        else { current.insert(url.path) }
         favoritePaths = current
         objectWillChange.send()
     }
@@ -74,34 +63,19 @@ class WallpaperVM: ObservableObject {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Select Folder"
-
         if panel.runModal() == .OK, let url = panel.url {
             self.folderPathString = url.path
             fetchWallpapers()
         }
     }
 
-    // --- UPDATED: Scans for both Photos and Videos separately ---
     func fetchWallpapers() {
         guard !folderPathString.isEmpty else { return }
         let url = URL(fileURLWithPath: folderPathString)
-        
         DispatchQueue.global(qos: .userInitiated).async {
-            // Use "?? []" to provide an empty array if the directory read fails
-            let files = (try? FileManager.default.contentsOfDirectory(
-                at: url,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            )) ?? [] // This unwraps the optional safely
-            
-            let photos = files.filter {
-                ["jpg", "jpeg", "png", "heic", "webp"].contains($0.pathExtension.lowercased())
-            }
-            
-            let videos = files.filter {
-                ["mp4", "mov", "m4v"].contains($0.pathExtension.lowercased())
-            }
-
+            let files = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+            let photos = files.filter { ["jpg", "jpeg", "png", "heic", "webp"].contains($0.pathExtension.lowercased()) }
+            let videos = files.filter { ["mp4", "mov", "m4v"].contains($0.pathExtension.lowercased()) }
             DispatchQueue.main.async {
                 self.photoURLs = photos
                 self.videoURLs = videos
@@ -111,7 +85,6 @@ class WallpaperVM: ObservableObject {
 
     private var lastUpdate: Date = .distantPast
 
-    // --- UPDATED: Handles switching between Static and Live Wallpapers ---
     func updateWallpaper(to url: URL) {
         guard Date().timeIntervalSince(lastUpdate) > 0.5 else { return }
         lastUpdate = Date()
@@ -121,21 +94,75 @@ class WallpaperVM: ObservableObject {
             let isVideo = ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased())
             
             if isVideo {
-                // Use the LiveWallManager engine for video files
                 LiveWallManager.shared.playVideo(url: url, allScreens: self.changeAllScreens)
+                self.setStaticThumbnail(from: url)
             } else {
-                // Stop any running video and set static image via macOS system
                 LiveWallManager.shared.stopAll()
+                self.applySystemWallpaper(url: url)
+            }
+        }
+    }
+
+    private func setStaticThumbnail(from url: URL) {
+        let asset = AVAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        let timestamp = CMTime(seconds: 0, preferredTimescale: 60)
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let imageRef = try generator.copyCGImage(at: timestamp, actualTime: nil)
                 
-                let screens = self.changeAllScreens ? NSScreen.screens : [NSScreen.main].compactMap { $0 }
-                for screen in screens {
-                    do {
-                        try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
-                    } catch {
-                        print("ACTUAL ERROR: \(error)")
+                let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                let appDir = appSupport.appendingPathComponent("W4M", isDirectory: true)
+                try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+                
+                // Using a unique ID ensures macOS doesn't ignore the change due to caching
+                let uniqueID = UUID().uuidString
+                let destinationURL = appDir.appendingPathComponent("lock_bg_\(uniqueID).jpg")
+                
+                let bitmapRep = NSBitmapImageRep(cgImage: imageRef)
+                if let jpegData = bitmapRep.representation(using: .jpeg, properties: [:]) {
+                    // Cleanup old thumbs first
+                    let existingFiles = (try? FileManager.default.contentsOfDirectory(at: appDir, includingPropertiesForKeys: nil)) ?? []
+                    for file in existingFiles { try? FileManager.default.removeItem(at: file) }
+                    
+                    try jpegData.write(to: destinationURL)
+                    
+                    DispatchQueue.main.async {
+                        self.applySystemWallpaper(url: destinationURL)
                     }
                 }
+            } catch {
+                print("Thumbnail failed: \(error)")
             }
+        }
+    }
+
+    private func applySystemWallpaper(url: URL) {
+        let path = url.path
+        
+        // --- THE AGGRESSIVE FIX ---
+        // This AppleScript manually iterates through every desktop "Space" and monitor
+        // to force the picture to update. This usually bypasses the "lazy" UI update.
+        let scriptSource = """
+        tell application "System Events"
+            set desktopCount to count of desktops
+            repeat with i from 1 to desktopCount
+                set picture of desktop i to "\(path)"
+            end repeat
+        end tell
+        """
+        
+        if let script = NSAppleScript(source: scriptSource) {
+            var error: NSDictionary?
+            script.executeAndReturnError(&error)
+        }
+
+        // Secondary backup using standard API for the login screen logic
+        let screens = self.changeAllScreens ? NSScreen.screens : [NSScreen.main].compactMap { $0 }
+        for screen in screens {
+            try? NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
         }
     }
 
@@ -145,9 +172,20 @@ class WallpaperVM: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self = self, self.changeAllScreens, !self.lastUsedWallpaperPath.isEmpty else { return }
+            guard let self = self, !self.lastUsedWallpaperPath.isEmpty else { return }
             let url = URL(fileURLWithPath: self.lastUsedWallpaperPath)
-            self.updateWallpaper(to: url)
+            
+            let isVideo = ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased())
+            if !isVideo {
+                self.applySystemWallpaper(url: url)
+            } else {
+                // For videos, find the latest thumbnail in App Support and re-apply
+                let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                let appDir = appSupport.appendingPathComponent("W4M")
+                if let latestThumb = try? FileManager.default.contentsOfDirectory(at: appDir, includingPropertiesForKeys: nil).first {
+                    self.applySystemWallpaper(url: latestThumb)
+                }
+            }
         }
     }
     
