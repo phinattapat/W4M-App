@@ -6,18 +6,35 @@ final class LiveWallManager {
     static let shared = LiveWallManager()
     private init() {}
 
-    private var wallpaperWindows: [NSScreen: (window: NSWindow, player: AVPlayer)] = [:]
+    // We use the deviceDescription to uniquely identify screens even if NSScreen objects change
+    private var wallpaperWindows: [String: (window: NSWindow, player: AVPlayer)] = [:]
 
-    func playVideo(url: URL, allScreens: Bool) {
-        stopAll()
-        let screens = allScreens ? NSScreen.screens : [NSScreen.main].compactMap { $0 }
-
-        for screen in screens {
-            let player = makeLoopingPlayer(url: url)
-            let window = makeWallpaperWindow(for: screen, player: player)
-            wallpaperWindows[screen] = (window, player)
-            player.play()
+    func playVideo(url: URL, allScreens: Bool, targetScreen: NSScreen? = nil) {
+        if allScreens {
+            stopAll()
+            for screen in NSScreen.screens {
+                createOrUpdateWindow(url: url, for: screen)
+            }
+        } else {
+            // If a specific screen is provided, use it; otherwise, default to main
+            let screen = targetScreen ?? NSScreen.main ?? NSScreen.screens.first!
+            createOrUpdateWindow(url: url, for: screen)
         }
+    }
+    
+    private func createOrUpdateWindow(url: URL, for screen: NSScreen) {
+        let screenID = "\(screen.deviceDescription)"
+        
+        // Stop existing player for THIS screen only
+        if let existing = wallpaperWindows[screenID] {
+            existing.player.pause()
+            existing.window.close()
+        }
+
+        let player = makeLoopingPlayer(url: url)
+        let window = makeWallpaperWindow(for: screen, player: player)
+        wallpaperWindows[screenID] = (window, player)
+        player.play()
     }
 
     func stopAll() {
@@ -72,7 +89,8 @@ final class LiveWallManager {
         hostView.layer?.addSublayer(playerLayer)
 
         window.contentView = hostView
-        window.setFrame(screen.frame, display: false)
+        // Important: Use frame of the specific screen
+        window.setFrame(screen.frame, display: true)
         window.orderFront(nil)
 
         return window

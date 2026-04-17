@@ -10,6 +10,22 @@ class WallpaperVM: ObservableObject {
     @Published var photoURLs: [URL] = []
     @Published var videoURLs: [URL] = []
 
+    // --- AUTO CHANGE SETTINGS ---
+    @AppStorage("autoChangeEnabled") var autoChangeEnabled: Bool = false {
+        didSet { setupAutoChangeTimer() }
+    }
+    
+    @AppStorage("autoChangeHH") var autoChangeHH: Int = 1
+    @AppStorage("autoChangeMM") var autoChangeMM: Int = 0
+    @AppStorage("autoChangeSS") var autoChangeSS: Int = 0
+
+    var autoChangeInterval: Double {
+        let total = (autoChangeHH * 3600) + (autoChangeMM * 60) + autoChangeSS
+        return total > 0 ? Double(total) : 60
+    }
+    
+    private var autoChangeTimer: AnyCancellable?
+
     var favoritePaths: Set<String> {
         get { (try? JSONDecoder().decode(Set<String>.self, from: favoritePathsData)) ?? [] }
         set { if let data = try? JSONEncoder().encode(newValue) { favoritePathsData = data } }
@@ -55,18 +71,35 @@ class WallpaperVM: ObservableObject {
         if !folderPathString.isEmpty { fetchWallpapers() }
         startMonitoring()
         setupSpaceObserver()
-        
-        // --- VER 1 FIX: RESTORE LIVE WALLPAPER ON LOGIN ---
+        setupAutoChangeTimer()
         restoreWallpaperOnLaunch()
     }
     
+    func setupAutoChangeTimer() {
+        autoChangeTimer?.cancel()
+        guard autoChangeEnabled else { return }
+        
+        autoChangeTimer = Timer.publish(every: autoChangeInterval, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.pickRandomWallpaper()
+            }
+    }
+
+    func pickRandomWallpaper() {
+        let source = currentWallpapers
+        guard !source.isEmpty else { return }
+        if let randomURL = source.randomElement() {
+            updateWallpaper(to: randomURL)
+        }
+    }
+
     private func restoreWallpaperOnLaunch() {
         guard !lastUsedWallpaperPath.isEmpty else { return }
         let url = URL(fileURLWithPath: lastUsedWallpaperPath)
         let isVideo = ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased())
         
         if isVideo {
-            // Delay slightly to ensure the desktop window manager is ready after login
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 LiveWallManager.shared.playVideo(url: url, allScreens: self.changeAllScreens)
             }
@@ -101,7 +134,7 @@ class WallpaperVM: ObservableObject {
 
     private var lastUpdate: Date = .distantPast
 
-    func updateWallpaper(to url: URL) {
+    func updateWallpaper(to url: URL, targetScreen: NSScreen? = nil) {
         guard Date().timeIntervalSince(lastUpdate) > 0.5 else { return }
         lastUpdate = Date()
 
@@ -110,11 +143,15 @@ class WallpaperVM: ObservableObject {
             let isVideo = ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased())
             
             if isVideo {
-                LiveWallManager.shared.playVideo(url: url, allScreens: self.changeAllScreens)
+                // Pass targetScreen through to the manager
+                LiveWallManager.shared.playVideo(url: url, allScreens: self.changeAllScreens, targetScreen: targetScreen)
                 self.setStaticThumbnail(from: url)
             } else {
-                LiveWallManager.shared.stopAll()
-                self.applySystemWallpaper(url: url)
+                // If user selects a static photo, decide if we stop ALL videos or just for that screen
+                if self.changeAllScreens {
+                    LiveWallManager.shared.stopAll()
+                }
+                self.applySystemWallpaper(url: url, targetScreen: targetScreen)
             }
         }
     }
@@ -151,25 +188,33 @@ class WallpaperVM: ObservableObject {
         }
     }
 
-    private func applySystemWallpaper(url: URL) {
-        let path = url.path
-        let scriptSource = """
-        tell application "System Events"
-            set desktopCount to count of desktops
-            repeat with i from 1 to desktopCount
-                set picture of desktop i to "\(path)"
-            end repeat
-        end tell
-        """
-        
-        if let script = NSAppleScript(source: scriptSource) {
-            var error: NSDictionary?
-            script.executeAndReturnError(&error)
+    private func applySystemWallpaper(url: URL, targetScreen: NSScreen? = nil) {
+        let screens: [NSScreen]
+        if self.changeAllScreens {
+            screens = NSScreen.screens
+        } else {
+            screens = [targetScreen ?? NSScreen.main].compactMap { $0 }
         }
-
-        let screens = self.changeAllScreens ? NSScreen.screens : [NSScreen.main].compactMap { $0 }
+        
         for screen in screens {
             try? NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
+        }
+        
+        // AppleScript fallback for "All Screens" to ensure system consistency
+        if self.changeAllScreens {
+            let path = url.path
+            let scriptSource = """
+            tell application "System Events"
+                set desktopCount to count of desktops
+                repeat with i from 1 to desktopCount
+                    set picture of desktop i to "\(path)"
+                end repeat
+            end tell
+            """
+            if let script = NSAppleScript(source: scriptSource) {
+                var error: NSDictionary?
+                script.executeAndReturnError(&error)
+            }
         }
     }
 
@@ -198,87 +243,6 @@ class WallpaperVM: ObservableObject {
     func startMonitoring() {
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             self?.fetchWallpapers()
-        }
-    }
-}
-
-// --- COMPONENTS ---
-
-struct WallpaperItem: View {
-    let url: URL
-    let isActive: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                // --- VER 2 FIX: ALWAYS USE STATIC THUMBNAIL IN LIST ---
-                StaticThumbnailView(url: url)
-                    .frame(width: 130, height: 85)
-                    .cornerRadius(10)
-                    .clipped()
-                    .blur(radius: isActive ? 8 : 0)
-                
-                if isActive {
-                    RoundedRectangle(cornerRadius: 10).stroke(Color.white, lineWidth: 3).shadow(radius: 10)
-                    Image(systemName: "sparkles").foregroundColor(.white).font(.title2)
-                }
-            }
-            .scaleEffect(isActive ? 1.25 : 1.0)
-            .rotationEffect(.degrees(isActive ? 4 : 0))
-            .shadow(color: .black.opacity(isActive ? 0.5 : 0.2), radius: isActive ? 20 : 4)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-/// New View that generates and displays a static image from a video URL for the list
-struct StaticThumbnailView: View {
-    let url: URL
-    @State private var thumbnail: NSImage? = nil
-
-    var body: some View {
-        ZStack {
-            if let thumbnail = thumbnail {
-                Image(nsImage: thumbnail)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else {
-                Color.black.opacity(0.1)
-                ProgressView().controlSize(.small)
-            }
-        }
-        .onAppear {
-            generateThumbnail()
-        }
-    }
-
-    private func generateThumbnail() {
-        let isVideo = ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased())
-        if !isVideo {
-            // Standard image handling
-            DispatchQueue.global(qos: .userInitiated).async {
-                if let image = NSImage(contentsOf: url) {
-                    DispatchQueue.main.async { self.thumbnail = image }
-                }
-            }
-            return
-        }
-
-        // Video thumbnail extraction
-        let asset = AVAsset(url: url)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        let time = CMTime(seconds: 1, preferredTimescale: 60) // Capture frame at 1s
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let imageRef = try generator.copyCGImage(at: time, actualTime: nil)
-                let nsImage = NSImage(cgImage: imageRef, size: NSSize(width: 130, height: 85))
-                DispatchQueue.main.async { self.thumbnail = nsImage }
-            } catch {
-                print("Grid thumbnail failed: \(error)")
-            }
         }
     }
 }
